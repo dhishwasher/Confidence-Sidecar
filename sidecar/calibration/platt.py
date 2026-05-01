@@ -11,6 +11,15 @@ if TYPE_CHECKING:
     pass
 
 
+class InsufficientLabelDiversityError(ValueError):
+    """Raised when all feedback labels belong to a single class.
+
+    Logistic regression requires at least one positive and one negative
+    example.  Callers should record 'insufficient_label_diversity' as the
+    calibration_status rather than crashing or silently training on bad data.
+    """
+
+
 async def train_calibration(
     customer_id: str,
     raw_scores: list[float],
@@ -20,7 +29,15 @@ async def train_calibration(
 
     Runs in a threadpool executor to avoid blocking the event loop.
     Returns a dict with 'a', 'b' params for sigmoid(a*x + b) mapping.
+
+    Raises:
+        InsufficientLabelDiversityError: if all labels are the same class.
     """
+    if len(set(labels)) < 2:
+        raise InsufficientLabelDiversityError(
+            f"All {len(labels)} feedback labels are '{labels[0]}'. "
+            "Need at least one 'correct' and one 'incorrect' sample to fit calibration."
+        )
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _fit_platt, raw_scores, labels)
 

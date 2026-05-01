@@ -30,27 +30,26 @@ _CONFIDENCE_METHOD = "tier0_logprob_stop_v1"
 
 
 def _make_request_hash(parsed: ChatCompletionRequest) -> str:
-    """Stable hash that captures all parameters that affect model output.
+    """Stable hash covering every field that can affect model output.
 
-    Includes model, messages, and every sampler knob so that two meaningfully
-    different requests never collapse to the same hash.
+    Strategy: take the full validated request dict, strip only the fields that
+    the sidecar injects itself (logprobs, top_logprobs, stream_options), and
+    normalise the remainder.  This future-proofs against new OpenAI parameters
+    and catches provider-specific extras that arrive via model_config extra='allow'.
     """
-    payload = {
-        "model": parsed.model,
-        "messages": [m.model_dump(exclude_none=True) for m in parsed.messages],
-        "temperature": parsed.temperature,
-        "top_p": parsed.top_p,
-        "max_tokens": parsed.max_tokens,
-        "max_completion_tokens": parsed.max_completion_tokens,
-        "seed": parsed.seed,
-        "stop": sorted(parsed.stop) if isinstance(parsed.stop, list) else parsed.stop,
-        "tools": parsed.tools,
-        "tool_choice": parsed.tool_choice,
-        "response_format": parsed.response_format,
-        "frequency_penalty": parsed.frequency_penalty,
-        "presence_penalty": parsed.presence_penalty,
-    }
-    canonical = json.dumps(payload, sort_keys=True, default=str)
+    # model_dump includes extra fields passed through the open model
+    full = parsed.model_dump(exclude_none=True)
+
+    # Remove sidecar-injected fields that we add upstream but the caller didn't set
+    for key in ("logprobs", "top_logprobs", "stream_options"):
+        full.pop(key, None)
+
+    # Normalise stop: list order shouldn't matter for equivalence
+    if isinstance(full.get("stop"), list):
+        full["stop"] = sorted(full["stop"])
+
+    # Normalise messages: exclude_none already applied; ensure list is stable
+    canonical = json.dumps(full, sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 

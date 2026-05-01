@@ -118,7 +118,7 @@ class ConfidenceChunk(BaseModel):
     """Extra SSE object injected by the proxy before [DONE].
 
     Standard OpenAI SDKs skip unknown object types, so this is invisible to
-    unmodified client code.  Set CONFIDENCE_STREAM_MODE=header_only or
+    unmodified client code.  Set CONFIDENCE_STREAM_MODE=store_only or
     disabled if your client is known to choke on extra SSE objects.
 
     Semantics note: ``confidence`` is the *token-distribution confidence*

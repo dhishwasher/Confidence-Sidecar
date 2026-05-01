@@ -102,6 +102,17 @@ async def maybe_retrain(customer_id: str) -> None:
     raw_scores = [r["raw_score"] for r in rows]
     labels = [1 if r["label"] == "correct" else 0 for r in rows]
 
+    # Guard: logistic regression requires at least one sample from each class
+    unique_labels = set(labels)
+    if len(unique_labels) < 2:
+        only_class = "correct" if 1 in unique_labels else "incorrect"
+        logger.warning(
+            "Skipping calibration refit for %s: all %d labels are '%s'. "
+            "Need both correct and incorrect examples.",
+            customer_id, len(labels), only_class,
+        )
+        return
+
     loop = asyncio.get_event_loop()
     try:
         from sidecar.calibration.platt import _fit_platt
