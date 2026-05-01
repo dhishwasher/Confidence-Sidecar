@@ -1,0 +1,37 @@
+{
+  "id": "chatcmpl-testfixture001",
+  "object": "chat.completion",
+  "created": 1746100000,
+  "model": "gpt-4o",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Paris"
+      },
+      "finish_reason": "stop",
+      "logprobs": {
+        "content": [
+          {
+            "token": "Paris",
+            "logprob": -0.021,
+            "top_logprobs": [
+              {"token": "Paris",  "logprob": -0.021},
+              {"token": "London", "logprob": -4.5},
+              {"token": "Berlin", "logprob": -5.1},
+              {"token": "Rome",   "logprob": -5.8},
+              {"token": "Madrid", "logprob": -6.2}
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 15,
+    "completion_tokens": 1,
+    "total_tokens": 16
+  },
+  "system_fingerprint": "fp_test"
+}
