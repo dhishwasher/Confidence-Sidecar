@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Uses settings.database_url by default (no argument needed)
     await init_db()
     logger.info("Confidence Sidecar started")
     yield
@@ -28,7 +29,6 @@ async def health() -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
-# Routers registered after import to avoid circular deps
 from sidecar.routers import calibration, feedback, proxy, traces  # noqa: E402
 
 app.include_router(proxy.router, prefix="/v1")

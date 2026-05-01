@@ -115,8 +115,27 @@ class ChatCompletionChunk(BaseModel):
 
 
 class ConfidenceChunk(BaseModel):
+    """Extra SSE object injected by the proxy before [DONE].
+
+    Standard OpenAI SDKs skip unknown object types, so this is invisible to
+    unmodified client code.  Set CONFIDENCE_STREAM_MODE=header_only or
+    disabled if your client is known to choke on extra SSE objects.
+
+    Semantics note: ``confidence`` is the *token-distribution confidence*
+    (generation certainty), not a claim about factual correctness.
+    """
+
     object: Literal["chat.completion.confidence"] = "chat.completion.confidence"
     trace_id: str
+
+    # Calibrated score (identity until a calibration curve is fitted)
     confidence: float
-    confidence_tier: int
+    # Raw signal fusion score before calibration
+    confidence_raw: float
+    confidence_tier: int  # 0=low(<0.3), 1=mid(0.3-0.7), 2=high(>0.7)
+
+    confidence_method: str
+    calibration_status: str
+
+    # Per-signal breakdown
     signals: dict[str, float]

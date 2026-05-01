@@ -8,6 +8,7 @@ from typing import Any, AsyncIterator
 
 import orjson
 
+from sidecar.config import settings
 from sidecar.models.openai import ConfidenceChunk
 from sidecar.models.trace import SignalRecord, TraceRecord
 from sidecar.signals.combiner import classify_confidence_tier, combine_signals
@@ -16,6 +17,8 @@ from sidecar.signals.stop_reason import compute_stop_reason_signal
 from sidecar.streaming.sse_parser import SSEAccumulator
 
 logger = logging.getLogger(__name__)
+
+_CONFIDENCE_METHOD = "tier0_logprob_stop_v1"
 
 
 async def emit_streaming_response(
@@ -27,39 +30,55 @@ async def emit_streaming_response(
     request_hash: str,
     started_at: float,
     upstream_started_at: float,
-    save_trace_fn,  # coroutine: async (TraceRecord) -> None
+    save_trace_fn,
 ) -> AsyncIterator[bytes]:
     """Async generator for the streaming proxy response.
 
-    Forwards upstream SSE chunks, intercepts [DONE], injects a confidence
-    SSE chunk, then re-emits [DONE].  Fires trace save as a background task.
+    Behaviour depends on ``settings.confidence_stream_mode``:
+
+    * ``chunk``       — forward content, then inject a confidence SSE object
+                        before re-emitting [DONE].
+    * ``header_only`` — forward content unmodified (except logprob stripping);
+                        confidence is computed and stored but NOT sent to the
+                        client via the SSE body.
+    * ``disabled``    — pass the stream through completely unchanged; no
+                        confidence computation, no trace storage.
     """
+    stream_mode = settings.confidence_stream_mode
+
+    if stream_mode == "disabled":
+        async for raw in upstream_bytes:
+            yield raw
+        return
+
     acc = SSEAccumulator(customer_wants_logprobs=customer_wants_logprobs)
 
     async for raw in upstream_bytes:
         for item in acc.feed(raw):
             if item is None:
-                async for chunk in _emit_confidence_and_done(
+                async for chunk in _finalise(
                     acc, trace_id, customer_id, request_model,
-                    request_hash, started_at, upstream_started_at, save_trace_fn
+                    request_hash, started_at, upstream_started_at,
+                    save_trace_fn, stream_mode,
                 ):
                     yield chunk
                 return
             yield item
 
-    # Defensive: flush any bytes still buffered (upstream omitted trailing \n\n)
+    # Defensive flush for streams that omit the trailing \n\n
     for item in acc.flush():
         if item is None:
-            async for chunk in _emit_confidence_and_done(
+            async for chunk in _finalise(
                 acc, trace_id, customer_id, request_model,
-                request_hash, started_at, upstream_started_at, save_trace_fn
+                request_hash, started_at, upstream_started_at,
+                save_trace_fn, stream_mode,
             ):
                 yield chunk
             return
         yield item
 
 
-async def _emit_confidence_and_done(
+async def _finalise(
     acc: SSEAccumulator,
     trace_id: str,
     customer_id: str,
@@ -68,6 +87,7 @@ async def _emit_confidence_and_done(
     started_at: float,
     upstream_started_at: float,
     save_trace_fn,
+    stream_mode: str,
 ) -> AsyncIterator[bytes]:
     choices_snapshot = acc.build_choices_snapshot()
     entropy = compute_logprob_entropy(choices_snapshot)
@@ -78,8 +98,12 @@ async def _emit_confidence_and_done(
         "logprob_entropy": lp_conf,
         "stop_reason": sr_conf,
     }
-    confidence = combine_signals(signals_map, tier=0)
-    conf_tier = classify_confidence_tier(confidence)
+    confidence_raw = combine_signals(signals_map, tier=0)
+    conf_tier = classify_confidence_tier(confidence_raw)
+
+    # Apply calibration
+    from sidecar.calibration.engine import calibrate
+    confidence, calibration_status = await calibrate(confidence_raw, customer_id)
 
     now = time.time()
     signal_records = [
@@ -90,13 +114,18 @@ async def _emit_confidence_and_done(
             SignalRecord(signal_name="logprob_entropy", signal_value=lp_conf, computed_at=now)
         )
 
-    conf_chunk = ConfidenceChunk(
-        trace_id=trace_id,
-        confidence=round(confidence, 4),
-        confidence_tier=conf_tier,
-        signals={k: round(v, 4) for k, v in signals_map.items() if v is not None},
-    )
-    yield b"data: " + orjson.dumps(conf_chunk.model_dump()) + b"\n\n"
+    if stream_mode == "chunk":
+        conf_chunk = ConfidenceChunk(
+            trace_id=trace_id,
+            confidence=round(confidence, 4),
+            confidence_raw=round(confidence_raw, 4),
+            confidence_tier=conf_tier,
+            confidence_method=_CONFIDENCE_METHOD,
+            calibration_status=calibration_status,
+            signals={k: round(v, 4) for k, v in signals_map.items() if v is not None},
+        )
+        yield b"data: " + orjson.dumps(conf_chunk.model_dump()) + b"\n\n"
+
     yield b"data: [DONE]\n\n"
 
     trace = TraceRecord(
@@ -107,8 +136,10 @@ async def _emit_confidence_and_done(
         provider="openai",
         tier=0,
         confidence=round(confidence, 4),
-        confidence_raw=round(confidence, 4),
+        confidence_raw=round(confidence_raw, 4),
         confidence_tier=conf_tier,
+        confidence_method=_CONFIDENCE_METHOD,
+        calibration_status=calibration_status,
         stop_reason=acc.finish_reason,
         request_hash=request_hash,
         streaming=True,

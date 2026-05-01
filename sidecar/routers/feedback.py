@@ -13,5 +13,5 @@ async def submit_feedback(trace_id: str, body: FeedbackRequest) -> JSONResponse:
     trace = await get_trace(trace_id)
     if trace is None:
         raise HTTPException(status_code=404, detail="Trace not found")
-    await save_feedback(trace_id, body)
+    await save_feedback(trace_id, trace.customer_id, body)
     return JSONResponse({"status": "accepted", "trace_id": trace_id})

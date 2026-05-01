@@ -11,6 +11,8 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from sidecar.calibration.engine import calibrate
+from sidecar.config import settings
 from sidecar.middleware.auth import get_customer_id
 from sidecar.models.openai import ChatCompletionRequest
 from sidecar.models.trace import SignalRecord, TraceRecord
@@ -24,13 +26,35 @@ from sidecar.streaming.sse_emitter import emit_streaming_response
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-
-def _make_request_hash(messages: list) -> str:
-    payload = json.dumps([m if isinstance(m, dict) else m.model_dump() for m in messages], sort_keys=True)
-    return hashlib.sha256(payload.encode()).hexdigest()
+_CONFIDENCE_METHOD = "tier0_logprob_stop_v1"
 
 
-async def _save_trace_bg(trace: TraceRecord) -> None:
+def _make_request_hash(parsed: ChatCompletionRequest) -> str:
+    """Stable hash that captures all parameters that affect model output.
+
+    Includes model, messages, and every sampler knob so that two meaningfully
+    different requests never collapse to the same hash.
+    """
+    payload = {
+        "model": parsed.model,
+        "messages": [m.model_dump(exclude_none=True) for m in parsed.messages],
+        "temperature": parsed.temperature,
+        "top_p": parsed.top_p,
+        "max_tokens": parsed.max_tokens,
+        "max_completion_tokens": parsed.max_completion_tokens,
+        "seed": parsed.seed,
+        "stop": sorted(parsed.stop) if isinstance(parsed.stop, list) else parsed.stop,
+        "tools": parsed.tools,
+        "tool_choice": parsed.tool_choice,
+        "response_format": parsed.response_format,
+        "frequency_penalty": parsed.frequency_penalty,
+        "presence_penalty": parsed.presence_penalty,
+    }
+    canonical = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+async def _save_bg(trace: TraceRecord) -> None:
     try:
         await save_trace(trace)
     except Exception:
@@ -50,7 +74,7 @@ async def chat_completions(
 
     customer_wants_logprobs = bool(parsed.logprobs)
     trace_id = "tr_" + uuid4().hex
-    request_hash = _make_request_hash(parsed.messages)
+    request_hash = _make_request_hash(parsed)
     started_at = time.time()
 
     upstream_body, _ = inject_logprobs(body)
@@ -63,6 +87,16 @@ async def chat_completions(
         async def byte_stream():
             async for chunk in provider.stream(upstream_body, inbound_headers):
                 yield chunk
+
+        stream_mode = settings.confidence_stream_mode
+        initial_headers: dict[str, str] = {
+            "X-Trace-Id": trace_id,
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        }
+        if stream_mode == "disabled":
+            # Pure pass-through: no sidecar headers at all
+            initial_headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
         return StreamingResponse(
             emit_streaming_response(
@@ -77,14 +111,11 @@ async def chat_completions(
                 save_trace_fn=save_trace,
             ),
             media_type="text/event-stream",
-            headers={
-                "X-Trace-Id": trace_id,
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
+            headers=initial_headers,
         )
 
-    # Non-streaming path
+    # ── Non-streaming path ────────────────────────────────────────────────────
+
     upstream_started_at = time.time()
     try:
         resp = await provider.complete(upstream_body, inbound_headers)
@@ -97,7 +128,7 @@ async def chat_completions(
     choices = data.get("choices", [])
     finish_reason = choices[0].get("finish_reason") if choices else None
 
-    # Compute Tier 0 signals
+    # Tier 0 signals — token-distribution confidence, not factual correctness
     entropy = compute_logprob_entropy(choices)
     lp_conf = entropy_to_confidence(entropy) if entropy is not None else None
     sr_conf = compute_stop_reason_signal(finish_reason)
@@ -106,8 +137,11 @@ async def chat_completions(
         "logprob_entropy": lp_conf,
         "stop_reason": sr_conf,
     }
-    confidence = combine_signals(signals_map, tier=0)
-    conf_tier = classify_confidence_tier(confidence)
+    confidence_raw = combine_signals(signals_map, tier=0)
+    conf_tier = classify_confidence_tier(confidence_raw)
+
+    # Calibration: identity until per-customer curve is fitted
+    confidence, calibration_status = await calibrate(confidence_raw, customer_id)
 
     if not customer_wants_logprobs:
         strip_logprobs_from_response(data)
@@ -132,8 +166,10 @@ async def chat_completions(
         completion_tokens=usage.get("completion_tokens"),
         tier=0,
         confidence=round(confidence, 4),
-        confidence_raw=round(confidence, 4),
+        confidence_raw=round(confidence_raw, 4),
         confidence_tier=conf_tier,
+        confidence_method=_CONFIDENCE_METHOD,
+        calibration_status=calibration_status,
         stop_reason=finish_reason,
         request_hash=request_hash,
         streaming=False,
@@ -141,13 +177,20 @@ async def chat_completions(
         upstream_latency_ms=upstream_latency_ms,
         signals=signal_records,
     )
-    asyncio.create_task(_save_trace_bg(trace))
+    asyncio.create_task(_save_bg(trace))
 
     return JSONResponse(
         content=data,
         headers={
+            # Calibrated score (best estimate; == raw until curve is fitted)
             "X-Confidence": f"{confidence:.4f}",
+            # Raw signal fusion score before calibration
+            "X-Confidence-Raw": f"{confidence_raw:.4f}",
             "X-Confidence-Tier": str(conf_tier),
+            # Provenance so consumers know what they're looking at
+            "X-Confidence-Method": _CONFIDENCE_METHOD,
+            "X-Calibration-Status": calibration_status,
+            # Raw entropy value for transparency
             "X-Signal-Logprob-Entropy": f"{entropy:.4f}" if entropy is not None else "n/a",
             "X-Trace-Id": trace_id,
         },

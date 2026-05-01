@@ -17,12 +17,14 @@ async def save_trace(trace: TraceRecord) -> None:
             id, customer_id, created_at, model, provider,
             prompt_tokens, completion_tokens, tier,
             confidence, confidence_raw, confidence_tier,
+            confidence_method, calibration_status,
             stop_reason, request_hash, streaming,
             latency_ms, upstream_latency_ms
         ) VALUES (
             :id, :customer_id, :created_at, :model, :provider,
             :prompt_tokens, :completion_tokens, :tier,
             :confidence, :confidence_raw, :confidence_tier,
+            :confidence_method, :calibration_status,
             :stop_reason, :request_hash, :streaming,
             :latency_ms, :upstream_latency_ms
         )
@@ -39,6 +41,8 @@ async def save_trace(trace: TraceRecord) -> None:
             "confidence": trace.confidence,
             "confidence_raw": trace.confidence_raw,
             "confidence_tier": trace.confidence_tier,
+            "confidence_method": trace.confidence_method,
+            "calibration_status": trace.calibration_status,
             "stop_reason": trace.stop_reason,
             "request_hash": trace.request_hash,
             "streaming": int(trace.streaming),
@@ -73,6 +77,9 @@ async def get_trace(trace_id: str) -> TraceRecord | None:
 
     trace_data = dict(row)
     trace_data["streaming"] = bool(trace_data["streaming"])
+    # Provide defaults for older rows that predate migration 003
+    trace_data.setdefault("confidence_method", "tier0_logprob_stop_v1")
+    trace_data.setdefault("calibration_status", "uncalibrated")
 
     async with db.execute(
         "SELECT * FROM signals WHERE trace_id = ? ORDER BY computed_at", (trace_id,)

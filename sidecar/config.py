@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,6 +11,7 @@ class Settings(BaseSettings):
     upstream_openai_base_url: str = "https://api.openai.com"
     upstream_anthropic_base_url: str = "https://api.anthropic.com"
 
+    # SQLAlchemy-style URL or bare file path both accepted
     database_url: str = "sqlite+aiosqlite:///./traces.db"
 
     # Customer auth — empty string disables auth (dev mode)
@@ -25,6 +28,16 @@ class Settings(BaseSettings):
     # Semantic entropy (Tier 1)
     embedding_model: str = "all-MiniLM-L6-v2"
     semantic_similarity_threshold: float = 0.85
+
+    # How confidence is surfaced on streaming responses:
+    #   chunk       — inject a chat.completion.confidence SSE object before [DONE]
+    #   header_only — compute and store confidence but do NOT inject into SSE body
+    #                 (safe for clients that choke on extra chunk types)
+    #   disabled    — pass stream through completely unmodified
+    confidence_stream_mode: Literal["chunk", "header_only", "disabled"] = "chunk"
+
+    # Minimum feedback samples before per-customer calibration is triggered
+    calibration_trigger_samples: int = 50
 
     log_level: str = "INFO"
 
