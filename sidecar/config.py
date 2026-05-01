@@ -31,10 +31,12 @@ class Settings(BaseSettings):
 
     # How confidence is surfaced on streaming responses:
     #   chunk       — inject a chat.completion.confidence SSE object before [DONE]
-    #   header_only — compute and store confidence but do NOT inject into SSE body
-    #                 (safe for clients that choke on extra chunk types)
-    #   disabled    — pass stream through completely unmodified
-    confidence_stream_mode: Literal["chunk", "header_only", "disabled"] = "chunk"
+    #   store_only  — compute, store, and trace confidence but do NOT inject into
+    #                 the SSE body (safe for clients that choke on extra chunk types;
+    #                 fetch final score via GET /v1/traces/{id}/confidence)
+    #   disabled    — pure transparent pass-through: no logprob injection upstream,
+    #                 no parsing, no tracing, no SSE modification whatsoever
+    confidence_stream_mode: Literal["chunk", "store_only", "disabled"] = "chunk"
 
     # Minimum feedback samples before per-customer calibration is triggered
     calibration_trigger_samples: int = 50

@@ -38,7 +38,7 @@ async def emit_streaming_response(
 
     * ``chunk``       — forward content, then inject a confidence SSE object
                         before re-emitting [DONE].
-    * ``header_only`` — forward content unmodified (except logprob stripping);
+    * ``store_only`` — forward content unmodified (except logprob stripping);
                         confidence is computed and stored but NOT sent to the
                         client via the SSE body.
     * ``disabled``    — pass the stream through completely unchanged; no

@@ -61,10 +61,10 @@ async def test_content_type_is_sse(client, mock_openai_stream):
 
 
 @pytest.mark.asyncio
-async def test_stream_mode_header_only(client, mock_openai_stream, monkeypatch):
-    """In header_only mode, no confidence SSE chunk is injected."""
+async def test_stream_mode_store_only(client, mock_openai_stream, monkeypatch):
+    """In store_only mode, no confidence SSE chunk is injected."""
     from sidecar import config
-    monkeypatch.setattr(config.settings, "confidence_stream_mode", "header_only")
+    monkeypatch.setattr(config.settings, "confidence_stream_mode", "store_only")
 
     lines = []
     async with client.stream("POST", "/v1/chat/completions", json=MINIMAL_REQUEST) as resp:
@@ -93,3 +93,38 @@ async def test_stream_mode_disabled_passes_through(client, mock_openai_stream, m
 
     confidence_lines = [l for l in lines if "chat.completion.confidence" in l]
     assert len(confidence_lines) == 0
+
+
+@pytest.mark.asyncio
+async def test_disabled_mode_does_not_inject_logprobs_upstream(
+    client, stream_bytes, monkeypatch
+):
+    """Disabled mode must not add logprobs=True to the upstream request."""
+    import json
+    import httpx
+    import respx
+
+    from sidecar import config
+    monkeypatch.setattr(config.settings, "confidence_stream_mode", "disabled")
+
+    captured = {}
+
+    def interceptor(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            content=stream_bytes,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    with respx.mock(base_url="https://api.openai.com", assert_all_called=False) as mock:
+        mock.post("/v1/chat/completions").mock(side_effect=interceptor)
+        async with client.stream(
+            "POST", "/v1/chat/completions",
+            json={**MINIMAL_REQUEST, "logprobs": False},
+        ) as resp:
+            async for _ in resp.aiter_bytes():
+                pass
+
+    # In disabled mode the customer's original logprobs=False must be forwarded
+    assert captured["body"].get("logprobs") is not True

@@ -77,7 +77,17 @@ async def chat_completions(
     request_hash = _make_request_hash(parsed)
     started_at = time.time()
 
-    upstream_body, _ = inject_logprobs(body)
+    stream_mode = settings.confidence_stream_mode
+
+    # In disabled streaming mode we must NOT inject logprobs upstream — that
+    # would both pay unnecessary token overhead and potentially leak logprob
+    # data to the client since we won't be parsing or stripping the stream.
+    should_instrument = not (parsed.stream and stream_mode == "disabled")
+    if should_instrument:
+        upstream_body, _ = inject_logprobs(body)
+    else:
+        upstream_body = body
+
     provider = get_openai_provider()
     inbound_headers = dict(request.headers)
 
@@ -88,7 +98,6 @@ async def chat_completions(
             async for chunk in provider.stream(upstream_body, inbound_headers):
                 yield chunk
 
-        stream_mode = settings.confidence_stream_mode
         initial_headers: dict[str, str] = {
             "X-Trace-Id": trace_id,
             "Cache-Control": "no-cache",
