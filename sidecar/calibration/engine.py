@@ -124,15 +124,38 @@ async def maybe_retrain(customer_id: str) -> None:
         logger.exception("Calibration refit failed for %s", customer_id)
         return
 
+    # Compute Brier score and ECE against the newly calibrated scores
+    calibrated = [_apply_platt(s, params) for s in raw_scores]
+    n = len(labels)
+    brier = sum((c - l) ** 2 for c, l in zip(calibrated, labels)) / n
+
+    _N_BINS = 10
+    bin_counts = [0] * _N_BINS
+    bin_correct = [0] * _N_BINS
+    bin_conf_sum = [0.0] * _N_BINS
+    for score, label in zip(calibrated, labels):
+        idx = min(int(score * _N_BINS), _N_BINS - 1)
+        bin_counts[idx] += 1
+        bin_correct[idx] += label
+        bin_conf_sum[idx] += score
+    ece = sum(
+        (bin_counts[i] / n) * abs((bin_correct[i] / bin_counts[i]) - (bin_conf_sum[i] / bin_counts[i]))
+        for i in range(_N_BINS)
+        if bin_counts[i] > 0
+    )
+
     await db.execute(
         """
-        INSERT INTO calibration_params (customer_id, model_type, params, trained_at, n_samples)
-        VALUES (?, 'platt', ?, ?, ?)
+        INSERT INTO calibration_params (customer_id, model_type, params, trained_at, n_samples, brier_score, ece)
+        VALUES (?, 'platt', ?, ?, ?, ?, ?)
         """,
-        (customer_id, orjson.dumps(params).decode(), time.time(), len(rows)),
+        (customer_id, orjson.dumps(params).decode(), time.time(), len(rows), round(brier, 4), round(ece, 4)),
     )
     await db.commit()
-    logger.info("Calibration refit complete for %s: %s", customer_id, params)
+    logger.info(
+        "Calibration refit complete for %s: %s  brier=%.4f  ece=%.4f",
+        customer_id, params, brier, ece,
+    )
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
